@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Pong — evolutionary self-play pong arena</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230b0b0d'/><circle cx='16' cy='16' r='6' fill='%23e8e7e2'/></svg>">
+<meta name="description" content="A deterministic C++17 pong simulator rebuilt as an arena for evolutionary self-play: GA + PPO agents, a Bradley-Terry Elo league, and live training + co-evolution dashboards.">
+<meta property="og:title" content="AI Pong — evolutionary self-play pong arena">
+<meta property="og:description" content="Deterministic C++17 pong: GA + PPO self-play agents, a Bradley-Terry Elo league, island co-evolution, and live imgui dashboards.">
+<style>
+  :root{
+    --bg:#0b0b0d; --panel:#141419; --ink:#e8e7e2; --dim:#9a988f; --line:#26262e;
+    --accent:#3a87e5; --accent2:#1aaf7a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:940px;margin:0 auto;padding:0 22px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{padding:66px 0 42px;text-align:center;border-bottom:1px solid var(--line)}
+  h1{font-size:46px;margin:0 0 10px;letter-spacing:-.02em}
+  .tag{color:var(--dim);font-size:19px;max-width:640px;margin:0 auto 20px}
+  .badge{margin:0 0 20px}
+  .cta{display:inline-flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .btn{display:inline-block;padding:10px 18px;border-radius:8px;font-weight:600;font-size:15px}
+  .btn.p{background:var(--accent);color:#fff}
+  .btn.s{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+  .shot{margin:36px auto 0;max-width:680px}
+  .shot img{width:100%;border-radius:10px;border:1px solid var(--line);display:block}
+  .shot figcaption{color:var(--dim);font-size:13px;margin-top:9px}
+  section{padding:46px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);
+    margin:0 0 18px;font-weight:700}
+  .lead{font-size:18px;margin:0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:19px}
+  .card h3{margin:0 0 6px;font-size:16px}
+  .card p{margin:0;color:var(--dim);font-size:14.5px}
+  .k{color:var(--accent2);font-weight:700}
+  .stack{color:var(--dim);font-size:16px;margin:0}
+  .stack b{color:var(--ink);font-weight:600}
+  footer{padding:34px 0 62px;color:var(--dim);font-size:14px}
+  footer .links{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:14px}
+  @media (max-width:560px){h1{font-size:35px}.tag{font-size:17px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>AI&nbsp;Pong</h1>
+    <p class="tag">A deterministic C++17 pong simulator rebuilt as an arena for
+      <b>evolutionary self-play</b> — agents train against themselves and a hall-of-fame of
+      their own ancestors, rated on an Elo ladder anchored by scripted bots.</p>
+    <p class="badge">
+      <a href="https://github.com/FunanShi/ai-pong/actions/workflows/ci.yml">
+        <img src="https://github.com/FunanShi/ai-pong/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+    </p>
+    <div class="cta">
+      <a class="btn p" href="https://github.com/FunanShi/ai-pong">View on GitHub →</a>
+      <a class="btn s" href="https://github.com/FunanShi/ai-pong/blob/main/docs/leaderboard.md">Leaderboard</a>
+    </div>
+    <figure class="shot">
+      <img src="media/pong.gif" alt="A trained agent rallying in AI Pong">
+      <figcaption>A trained policy rallying — self-play, no human in the loop.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<section><div class="wrap">
+  <h2>What it is</h2>
+  <p class="lead">One deterministic simulation core, a swappable agent framework, and two
+    training tracks — GA self-play and PPO — that export to the same model format and compete
+    on one Bradley-Terry Elo league. The strongest trained policy, a memoryless GA champion,
+    beats the perfect-prediction Interceptor bot 95% of the time (Elo 2014 vs. 1843).</p>
+</div></section>
+
+<section><div class="wrap">
+  <figure class="shot" style="max-width:900px">
+    <img src="media/coevolution-dashboard.png" alt="Co-evolution dashboard: per-species margin vs bots and self-play fitness, with the cross-island win matrix">
+    <figcaption>The live co-evolution dashboard (<span class="mono">./pong coview</span>) — four
+      network architectures raced as GA demes: per-species average margin vs the scripted bots
+      and self-play fitness (left), the cross-island win matrix (right), with pause/stop/eval
+      controls that drive the run.</figcaption>
+  </figure>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Highlights</h2>
+  <div class="grid">
+    <div class="card"><h3>Play it</h3><p>An imgui GUI: pick Human, a scripted bot, or any trained
+      model for each paddle — play the champion yourself, or watch two policies rally.</p></div>
+    <div class="card"><h3>Deterministic core</h3><p>Pure, IO-free sim with substepped
+      collision — <b class="k">bit-identical for any thread count</b>, so every experiment
+      reproduces exactly.</p></div>
+    <div class="card"><h3>GA self-play</h3><p>Evolution against live peers and a hall-of-fame
+      of ancestors, with opponent-diversity fitness and optional 0.5&nbsp;s memory windows.</p></div>
+    <div class="card"><h3>PPO track</h3><p>pybind11 <span class="mono">VecPong</span> bindings +
+      CleanRL-style PPO with an adaptive opponent curriculum and function-preserving warm
+      starts.</p></div>
+    <div class="card"><h3>Elo league</h3><p>Bradley-Terry ratings pinned to a P-controller
+      baseline and anchored by scripted bots — the apples-to-apples yardstick across both
+      tracks.</p></div>
+    <div class="card"><h3>Island co-evolution</h3><p>N architectures co-evolve as separate GA
+      demes under per-island selection, to ask <span class="k">which capacity wins</span> —
+      width vs depth — under co-adaptation.</p></div>
+    <div class="card"><h3>Live dashboards</h3><p>imgui training + co-evolution dashboards:
+      margin-vs-bots, the cross-island win matrix, ETA, and pause/stop/eval controls that drive
+      a running job.</p></div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Built with</h2>
+  <p class="stack"><b>C++17</b> · <b>Dear ImGui</b> + OpenGL/GLFW · <b>pybind11</b> + Python PPO ·
+    <b>CMake</b>/Ninja · fully hermetic <b>Docker</b> build &amp; test —
+    <span class="mono">./pong build &amp;&amp; ./pong test</span>.</p>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="links">
+    <a href="https://github.com/FunanShi/ai-pong">Repository</a>
+    <a href="https://github.com/FunanShi/ai-pong/blob/main/docs/training.md">Training</a>
+    <a href="https://github.com/FunanShi/ai-pong/blob/main/docs/evaluation.md">Evaluation</a>
+    <a href="https://github.com/FunanShi/ai-pong/blob/main/docs/formats.md">Formats</a>
+    <a href="https://github.com/FunanShi/ai-pong/blob/main/DECISIONS.md">Design decisions</a>
+  </div>
+  <div>&copy; 2026 Frank Shi · MIT License</div>
+</div></footer>
+</body>
+</html>

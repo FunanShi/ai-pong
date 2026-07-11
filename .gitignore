@@ -1,0 +1,11 @@
+build/
+imgui.ini
+__pycache__/
+
+# data dirs: weights, recordings, eval outputs stay local (dirs kept via .gitkeep)
+models/*
+!models/.gitkeep
+datasets/*
+!datasets/.gitkeep
+results/*
+!results/.gitkeep

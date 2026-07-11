@@ -1,0 +1,33 @@
+name: ci
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: docker
+          tags: ai_pong:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: configure + build (portable, no -march=native on runners)
+        run: >
+          docker run --rm -v "$PWD":/work -w /work ai_pong:ci
+          bash -c 'cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DAIPONG_MARCH_NATIVE=OFF && cmake --build build'
+      - name: test
+        run: docker run --rm -v "$PWD":/work -w /work ai_pong:ci ctest --test-dir build --output-on-failure
+      - name: profiler is determinism-neutral (AIPONG_PROFILE on == off, DECISIONS #24)
+        run: >
+          docker run --rm -v "$PWD":/work -w /work ai_pong:ci bash -c '
+          ./build/evolve --pop 8 --games 2 --gens 8 --eval-every 0 --seed 7 --out /tmp/ci_off >/dev/null &&
+          AIPONG_PROFILE=1 ./build/evolve --pop 8 --games 2 --gens 8 --eval-every 0 --seed 7 --out /tmp/ci_on >/dev/null &&
+          strip() { sed "s/,\"sec\":[0-9.eE+-]*//" "$1"; } &&
+          diff <(strip /tmp/ci_off/train_log.jsonl) <(strip /tmp/ci_on/train_log.jsonl) &&
+          echo "profiler on==off: fitness bit-identical (sec/wall-clock excluded)"'

@@ -1,0 +1,6 @@
+desc: starter GA self-play run (DECISIONS.md #10)
+# --threads 18 (not all cores): Decision 24 — leave headroom on an interactively-used machine
+# (propagated here from evomem.recipe; a short starter run still shouldn't saturate all 20).
+trainer: evolve
+out: models/evo
+args: --gens 300 --seed 1 --threads 18

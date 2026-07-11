@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IMAGE=ai_pong
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+X=(-e DISPLAY="${DISPLAY:-:0}" -v /tmp/.X11-unix:/tmp/.X11-unix:rw)
+U=(-u "$(id -u):$(id -g)" -e HOME=/tmp -e USER=pong -e LOGNAME=pong \
+   -e AIPONG_PROFILE="${AIPONG_PROFILE:-}")  # torch getpass needs a username; profiler opt-in (#24)
+V=(-v "$ROOT":/work -w /work)
+M=(-e AIPONG_MODEL="${AIPONG_MODEL:-}")
+grant_x(){ command -v xhost >/dev/null 2>&1 && xhost +local:docker >/dev/null 2>&1 || true; }
+
+# --out DIR value (or the given default) — tells the auto-launched dashboard which run to tail.
+out_dir(){ local o="$1"; shift; while [ $# -gt 0 ]; do if [ "$1" = "--out" ]; then o="$2"; fi; shift; done; printf '%s' "$o"; }
+
+# recipes/<name>.recipe → RCP_TRAINER, RCP_OUT, RCP_ARGS (space-joined). 1 = missing/invalid.
+load_recipe(){
+  case "$1" in */*|*..*) return 1 ;; esac    # recipe names can't traverse out of recipes/
+  local f="$ROOT/recipes/$1.recipe"
+  [ -f "$f" ] || return 1
+  RCP_TRAINER=$(sed -n 's/^trainer:[[:space:]]*//p' "$f" | head -1 | sed 's/[[:space:]]*$//')
+  RCP_OUT=$(sed -n 's/^out:[[:space:]]*//p' "$f" | head -1 | sed 's/[[:space:]]*$//')
+  RCP_ARGS=$(sed -n 's/^args:[[:space:]]*//p' "$f" | tr '\n' ' ')
+  [ -n "$RCP_TRAINER" ] && [ -n "$RCP_ARGS" ] && [ -n "$RCP_OUT" ]
+}
+list_recipes(){
+  echo "recipes  (./pong train <name> [overrides] — overrides append, last flag wins):"
+  local f
+  for f in "$ROOT"/recipes/*.recipe; do
+    [ -e "$f" ] || { echo "  (none found in recipes/)"; return 0; }
+    printf '  %-15s %s\n' "$(basename "${f%.recipe}")" "$(sed -n 's/^desc:[[:space:]]*//p' "$f" | head -1 | sed 's/[[:space:]]*$//')"
+  done
+}
+run_recipe(){                       # $1 = name, rest = override flags (trusted, not evaled)
+  local name="$1"; shift
+  load_recipe "$name" || { echo "recipe $name: missing or invalid (needs trainer/args/out fields)"; list_recipes; exit 1; }
+  local runner=()                   # validate the trainer BEFORE any side effects
+  case "$RCP_TRAINER" in
+    evolve) runner=(./build/evolve) ;;
+    ppo)    runner=(python3 src/train/ppo.py) ;;
+    *)      echo "recipe $name: unknown trainer '$RCP_TRAINER'"; exit 1 ;;
+  esac
+  local out; out=$(out_dir "$RCP_OUT" "$@")     # an --out override steers the dashboard too
+  launch_trainview "$out"
+  # shellcheck disable=SC2086   # RCP_ARGS is intentionally word-split (recipe flag list)
+  docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" "${runner[@]}" $RCP_ARGS --out "$RCP_OUT" "$@"
+}
+
+process_queue(){                    # one pass over results/queue (DECISIONS.md #20)
+  local qdir="$ROOT/results/queue"
+  mkdir -p "$qdir/claimed" 2>/dev/null || return 0
+  local req base
+  for req in "$qdir"/req_*.launch; do
+    [ -e "$req" ] || return 0
+    base=$(basename "$req")
+    mv "$req" "$qdir/claimed/$base" 2>/dev/null || continue          # atomic claim
+    local c="$qdir/claimed/$base" fail="$qdir/$base.failed"
+    local recipe out resume reqargs
+    recipe=$(sed -n 's/^recipe:[[:space:]]*//p'  "$c" | head -1 || true)
+    out=$(sed  -n 's/^out:[[:space:]]*//p'       "$c" | head -1 || true)
+    resume=$(sed -n 's/^resume:[[:space:]]*//p'  "$c" | head -1 || true)
+    reqargs=$(sed -n 's/^args:[[:space:]]*//p'   "$c" | tr '\n' ' ' || true)
+    local overrides=()
+    while IFS= read -r line; do
+      # shellcheck disable=SC2206  # flag lists are intentionally word-split
+      overrides+=($line)
+    done < <(sed -n 's/^override:[[:space:]]*//p' "$c")
+    if ! load_recipe "$recipe"; then echo "recipe $recipe: missing or invalid (needs trainer/args/out fields)" > "$fail"; continue; fi
+    [ -n "$out" ] || out="$RCP_OUT"
+    case "/$out/" in *"/../"*)                    # a .. segment could escape the repo mount
+      echo "refused: --out '$out' has a '..' path segment" > "$fail"; continue ;;
+    esac
+    case "$out" in models/?*|results/?*) ;; *)
+      echo "refused: --out '$out' must live under models/ or results/" > "$fail"; continue ;;
+    esac
+    if [ -f "$ROOT/$out/status.json" ] \
+       && grep -qE '"state":"(running|paused)"' "$ROOT/$out/status.json"; then
+      { echo "refused: --out '$out' has a trainer that looks active there (status.json running/paused) — launching would interleave writers and delete its pause token"
+        echo "if that run is actually dead, remove $out/status.json and relaunch"; } > "$fail"
+      continue
+    fi
+    [ -n "$reqargs" ] || reqargs="$RCP_ARGS"
+    local pre=(); [ -n "$resume" ] && pre=(--resume "$resume")
+    if [ -n "$resume" ]; then
+      if [ "$RCP_TRAINER" != evolve ]; then
+        echo "refused: resume: is for GA runs — continue a ppo run with --init-model <checkpoint> (the warm-start picker)" > "$fail"; continue
+      fi
+      if [ ! -f "$ROOT/$resume/population.txt" ]; then
+        echo "refused: '$resume' is not a resumable GA run (no population.txt) — ppo runs continue via --init-model" > "$fail"; continue
+      fi
+    fi
+    local runner=()
+    case "$RCP_TRAINER" in
+      evolve) runner=(./build/evolve) ;;
+      ppo)    runner=(python3 src/train/ppo.py) ;;
+      *) echo "recipe $recipe: unknown trainer '$RCP_TRAINER'" > "$fail"; continue ;;
+    esac
+    local name="aipong_train_$(printf '%s' "$out" | tr -c 'A-Za-z0-9' '_')"
+    # validated --out goes LAST: last-wins parsing means no args:/override: spelling of --out (incl. --out=, abbrevs) can beat it
+    # shellcheck disable=SC2086   # reqargs is a flag list by contract (validated --out appended last)
+    if docker run -d --rm --name "$name" "${U[@]}" "${V[@]}" "$IMAGE" \
+         "${runner[@]}" $reqargs "${pre[@]}" "${overrides[@]}" --out "$out" \
+         >/dev/null 2>"$fail.tmp"; then
+      rm -f "$fail.tmp"
+      echo "launched $name -> $out (recipe $recipe)"
+      rm -f "$c"
+    else
+      mv "$fail.tmp" "$fail"
+    fi
+  done
+}
+
+# Spawn the live dashboard detached, watching DIR. Skips cleanly with no display (SSH/CI) or
+# when AIPONG_NO_GUI is set; the trainer runs regardless.
+launch_trainview(){
+  local dir="$1"
+  if [ -n "${AIPONG_NO_GUI:-}" ]; then return 0; fi
+  if [ -z "${DISPLAY:-}" ] && [ ! -e /tmp/.X11-unix/X0 ]; then
+    echo "(no display — skipping live GUI; run  ./pong trainview $dir  where one is available)"; return 0
+  fi
+  grant_x
+  docker rm -f aipong_trainview >/dev/null 2>&1 || true
+  if docker run -d --rm --name aipong_trainview "${U[@]}" "${X[@]}" "${V[@]}" \
+       -e LIBGL_ALWAYS_SOFTWARE=1 "$IMAGE" ./build/pong_trainview "$dir" >/dev/null 2>&1; then
+    echo "live dashboard: container aipong_trainview watching $dir  (close its window to dismiss)"
+  else
+    echo "(dashboard did not start — run  ./pong trainview $dir  in a terminal with a display)"
+  fi
+}
+
+# Spawn the co-evolution dashboard detached, watching base DIR. Skips with no display.
+launch_coview(){
+  local dir="$1"
+  if [ -n "${AIPONG_NO_GUI:-}" ]; then return 0; fi
+  if [ -z "${DISPLAY:-}" ] && [ ! -e /tmp/.X11-unix/X0 ]; then
+    echo "(no display — skipping live coview; run  ./pong coview $dir  where one is available)"; return 0
+  fi
+  grant_x
+  docker rm -f aipong_coview >/dev/null 2>&1 || true
+  if docker run -d --rm --name aipong_coview "${U[@]}" "${X[@]}" "${V[@]}" \
+       -e LIBGL_ALWAYS_SOFTWARE=1 "$IMAGE" ./build/pong_coview "$dir" >/dev/null 2>&1; then
+    echo "live co-evolution dashboard: container aipong_coview watching $dir"
+  else
+    echo "(coview did not start — run  ./pong coview $dir  in a terminal with a display)"
+  fi
+}
+
+cmd="${1:-}"; shift || true
+if [ -z "$cmd" ]; then
+  cmd=imgui                                      # no args = play (scripts, no TTY)
+  if [ -t 0 ]; then                              # interactive boot menu (DECISIONS.md #20)
+    echo "AI Pong — [Enter] play    t) train    d) dashboard    q) quit"
+    read -r choice
+    case "$choice" in
+      "") ;;
+      t)  list_recipes; printf 'recipe> '; read -r r
+          # shellcheck disable=SC2086  # allow "evomem --seed 2" typed inline
+          [ -n "$r" ] && exec "$0" train $r; exit 0 ;;
+      d)  cmd=trainview ;;
+      q)  exit 0 ;;
+      *)  echo "?"; exit 1 ;;
+    esac
+  fi
+fi
+case "$cmd" in
+  build)
+    docker build -t "$IMAGE" "$ROOT/docker"
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" \
+      bash -c 'cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build' ;;
+  test)
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ctest --test-dir build --output-on-failure ;;
+  shell)
+    grant_x; docker run --rm -it "${U[@]}" "${X[@]}" "${V[@]}" "${M[@]}" "$IMAGE" bash "$@" ;;
+  genmodel)   # ./pong genmodel [seed] [stack] — writes models/random.txt for the Model slot
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/gen_random_model models/random.txt "${1:-42}" "${2:-1}" ;;
+  rallies)    # ./pong rallies <build|list|extract> [...] — the rally database (docs/formats.md)
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/rallydb "$@" ;;
+  evolve)     # ./pong evolve [--gens N --pop N ...] — GA self-play trainer (DECISIONS.md #10)
+    launch_trainview "$(out_dir models/evo "$@")"
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/evolve "$@" ;;
+  coevolve)   # ./pong coevolve --islands "32,32;64,64;..." [flags] — island (deme) co-evolution (DECISIONS #28)
+    launch_coview "$(out_dir models/coevo "$@")"
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/coevolve "$@" ;;
+  coview)     # ./pong coview [models/coevo] — live co-evolution dashboard + control panel (DECISIONS #29)
+    grant_x
+    docker run --rm -it "${U[@]}" "${X[@]}" "${V[@]}" "${M[@]}" \
+      -e LIBGL_ALWAYS_SOFTWARE=1 "$IMAGE" ./build/pong_coview "$@" ;;
+  train)      # ./pong train [<recipe> [overrides...]] — named runs from recipes/ (DECISIONS #20)
+    if [ $# -lt 1 ]; then list_recipes; exit 0; fi
+    run_recipe "$@" ;;
+  watch)      # ./pong watch [--once] — execute GUI launch requests from results/queue
+    if [ "${1:-}" = "--once" ]; then process_queue
+    else
+      echo "watching results/queue for New-run requests (ctrl-c to stop)"
+      while true; do process_queue; sleep 1; done
+    fi ;;
+  ladder)     # ./pong ladder [--dir models/evoN ...] — Elo ladder / deployment-champion pick
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/ladder "$@" ;;
+  bench)      # ./pong bench [--stack N] — sim/MLP throughput A/B (DECISIONS #11)
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/bench "$@" ;;
+  memuse)     # ./pong memuse <model.txt> [matches] [opponent] — is a stack>1 model USING its memory?
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/memuse "$@" ;;
+  aiming)     # ./pong aiming <model.txt> [matches] — HOW a model beats the instant Interceptor
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/aiming "$@" ;;
+  reeval)     # ./pong reeval <run-dir> [matches] [out] — true anchor curves from checkpoints (DECISIONS #18)
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" ./build/reeval "$@" ;;
+  ppo)        # ./pong ppo [--total-steps N ... | --smoke] — PPO self-play trainer (Python/torch)
+    launch_trainview "$(out_dir models/ppo "$@")"
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" python3 src/train/ppo.py "$@" ;;
+  pytest)     # bindings smoke tests
+    docker run --rm "${U[@]}" "${V[@]}" "$IMAGE" python3 src/bindings/test_bindings.py ;;
+  imgui)
+    grant_x; docker run --rm -it "${U[@]}" "${X[@]}" "${V[@]}" "${M[@]}" \
+      -e LIBGL_ALWAYS_SOFTWARE=1 "$IMAGE" ./build/pong_imgui ;;
+  trainview)  # ./pong trainview [models/evoN] — live dashboard + launch executor (#20)
+    grant_x
+    ( while true; do process_queue; sleep 1; done ) & TVWATCH=$!
+    trap 'kill "$TVWATCH" 2>/dev/null' EXIT
+    docker run --rm -it "${U[@]}" "${X[@]}" "${V[@]}" "${M[@]}" \
+      -e LIBGL_ALWAYS_SOFTWARE=1 "$IMAGE" ./build/pong_trainview "$@"
+    kill "$TVWATCH" 2>/dev/null ;;
+  imgui-gpu)   # fallback if software GL shows a black window (see ui_pong docs)
+    grant_x; docker run --rm -it "${U[@]}" "${X[@]}" "${V[@]}" "${M[@]}" \
+      --gpus all -e NVIDIA_DRIVER_CAPABILITIES=all -e __GLX_VENDOR_LIBRARY_NAME=nvidia \
+      -e LD_PRELOAD=/usr/local/lib/glx_present_shim.so -e __GL_SYNC_TO_VBLANK=0 \
+      --device /dev/dri "$IMAGE" ./build/pong_imgui ;;
+  *)
+    echo "usage: ./pong                 # play (same as ./pong imgui)"
+    echo "       ./pong <build|test|genmodel|rallies|train|evolve|coevolve|coview|ladder|bench|memuse|aiming|reeval|ppo|pytest|imgui|imgui-gpu|trainview|watch|shell>"; exit 1 ;;
+esac

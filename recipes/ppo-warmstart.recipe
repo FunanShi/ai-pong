@@ -1,0 +1,5 @@
+desc: PPO, all bells and whistles — warm-start from the best prior checkpoint
+trainer: ppo
+out: models/ppo3
+args: --init-model models/ppo2/ckpt_upd00400.txt
+args: --total-steps 50000000 --envs 32 --seed 1

@@ -1,0 +1,10 @@
+desc: GA, all bells and whistles — random-init 0.5 s memory + opponent-diversity pool (#14/#16)
+# --threads 18 (not 20): measured 2026-07-10, all-20 is only ~2% faster and leaves no
+# headroom for the dashboard/OS on an actively-used machine — deliberate, see DECISIONS.md #24.
+trainer: evolve
+out: models/evomem
+args: --stack 6 --stride 6
+args: --pool-dir models/pools/evomem --pool-games 1 --anchor-games 1
+args: --speed-bonus 0.2 --rally-cap 500 --speedup 1.06 --serve-hold 0 --win-score 5
+args: --pop 128 --games 8 --gens 3000 --eval-every 25 --eval-matches 24 --hof-every 10
+args: --seed 1 --threads 18

@@ -1,0 +1,11 @@
+desc: GA evomem + loss shaping (survival + concession-proximity) — rich-fitness A/B arm (#11 follow-up)
+# Same as evomem.recipe (same pool, same games budget) plus --loss-bonus/--loss-prox-weight,
+# so the A/B isolates the loss-side fitness shaping. --threads 18 rationale: see DECISIONS.md #24.
+trainer: evolve
+out: models/evomem_rich
+args: --stack 6 --stride 6
+args: --pool-dir models/pools/evomem --pool-games 1 --anchor-games 1
+args: --speed-bonus 0.2 --rally-cap 500 --speedup 1.06 --serve-hold 0 --win-score 5
+args: --loss-bonus 0.2 --loss-prox-weight 0.7
+args: --pop 128 --games 8 --gens 3000 --eval-every 25 --eval-matches 24 --hof-every 10
+args: --seed 1 --threads 18

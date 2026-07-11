@@ -1,0 +1,4 @@
+desc: PPO from scratch, memory + adaptive curriculum
+trainer: ppo
+out: models/ppo
+args: --total-steps 3000000
